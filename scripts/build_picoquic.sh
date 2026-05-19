@@ -20,6 +20,7 @@ CMAKE_ARGS=(
 )
 
 BUILD_TARGET=()
+
 if [[ -n "${CARGO_FEATURE_PICOQUIC_MINIMAL_BUILD:-}" ]]; then
   case "${CARGO_FEATURE_PICOQUIC_MINIMAL_BUILD,,}" in
     1|true|yes|on)
@@ -82,6 +83,7 @@ if [[ -n "${OPENSSL_USE_STATIC_LIBS:-}" ]]; then
 fi
 
 cmake -S "${PICOQUIC_DIR}" -B "${BUILD_DIR}" "${CMAKE_ARGS[@]}"
+
 if [[ ${#BUILD_TARGET[@]} -gt 0 ]]; then
   cmake --build "${BUILD_DIR}" "${BUILD_TARGET[@]}"
 else
