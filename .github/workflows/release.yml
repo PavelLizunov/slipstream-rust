@@ -69,28 +69,10 @@ jobs:
             exit 1
           fi
 
-          awk -v heading="## ${version} " '
-            index($0, heading) == 1 { found = 1; next }
-            found && /^## / { exit }
-            found { print }
-            END { if (!found) exit 1 }
-          ' CHANGELOG.md > release-notes.md
-          if [[ ! -s release-notes.md ]]; then
-            echo "CHANGELOG.md does not contain non-empty notes for ${version}" >&2
-            exit 1
-          fi
-
           {
             echo "version=${version}"
             echo "target=${target}"
           } >> "${GITHUB_OUTPUT}"
-
-      - name: Upload release notes
-        uses: actions/upload-artifact@v7
-        with:
-          name: release-notes
-          path: release-notes.md
-          if-no-files-found: error
 
   build-binaries:
     name: Build Binaries (${{ matrix.name }})
@@ -206,17 +188,11 @@ jobs:
             done
           done
 
-          notes_file="release-assets/release-notes/release-notes.md"
-          if [[ ! -s "${notes_file}" ]]; then
-            echo "Missing release notes artifact: ${notes_file}" >&2
-            exit 1
-          fi
-
           gh release create "${version}" \
             --repo "${GITHUB_REPOSITORY}" \
             --target "${target}" \
             --title "${version}" \
-            --notes-file "${notes_file}" \
+            --generate-notes \
             --draft
           gh release upload "${version}" "${asset_paths[@]}" --repo "${GITHUB_REPOSITORY}"
 

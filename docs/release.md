@@ -17,8 +17,6 @@ release is published without the required assets, do not mutate or reuse that
 tag; cut the next version instead.
 
 ## Prep
-- Update `CHANGELOG.md` with release notes and date.
-  The release workflow extracts notes from a `## vX.Y.Z - YYYY-MM-DD` section.
 - Bump versions in `Cargo.toml` (workspace and crates) as needed.
 - Ensure `Cargo.lock` is updated and committed.
 - Confirm vendor/picoquic is at the intended commit and submodules are initialized.
@@ -73,9 +71,10 @@ Use the exact commit SHA that passed validation. Do not create or push a local
 Git tag first for this workflow.
 
 The workflow builds all six binary artifacts, creates a draft release, uploads
-the required assets, and verifies the draft asset list. Leave `publish=false`
-to inspect the draft before publication. Use `publish=true` only when the
-release should be published immediately after the asset check. Release
+the required assets, verifies the draft asset list, and asks GitHub to generate
+release notes. Leave `publish=false` to inspect the draft before publication.
+Use `publish=true` only when the release should be published immediately after
+the asset check. Release
 immutability locks the tag and assets after publication, so a missing asset
 after publication means the release is bad and the fix is a new version.
 
