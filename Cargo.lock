@@ -414,7 +414,7 @@ checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 
 [[package]]
 name = "slipstream-client"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "clap",
  "libc",
@@ -429,7 +429,7 @@ dependencies = [
 
 [[package]]
 name = "slipstream-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "libc",
  "socket2",
@@ -440,7 +440,7 @@ dependencies = [
 
 [[package]]
 name = "slipstream-dns"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -450,7 +450,7 @@ dependencies = [
 
 [[package]]
 name = "slipstream-ffi"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "cc",
  "libc",
@@ -461,7 +461,7 @@ dependencies = [
 
 [[package]]
 name = "slipstream-server"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "clap",
  "libc",

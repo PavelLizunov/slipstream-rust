@@ -1,6 +1,6 @@
 [package]
 name = "slipstream-ffi"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "FFI bindings and runtime helpers for picoquic in Slipstream"
 license = "Apache-2.0"

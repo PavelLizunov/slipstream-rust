@@ -1,6 +1,6 @@
 [package]
 name = "slipstream-dns"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "DNS codec for Slipstream's QUIC-over-DNS tunnel"
 license = "Apache-2.0"

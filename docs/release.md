@@ -64,7 +64,8 @@ manually for a published release.
 gh workflow run release.yml \
   --repo Mygod/slipstream-rust \
   -f version=vX.Y.Z \
-  -f target=COMMIT_SHA
+  -f target=COMMIT_SHA \
+  -f publish=false
 gh run watch --repo Mygod/slipstream-rust
 ```
 
@@ -72,10 +73,11 @@ Use the exact commit SHA that passed validation. Do not create or push a local
 Git tag first for this workflow.
 
 The workflow builds all six binary artifacts, creates a draft release, uploads
-the required assets, verifies the draft asset list, and only then publishes the
-release. Release immutability locks the tag and assets after publication, so a
-missing asset after publication means the release is bad and the fix is a new
-version.
+the required assets, and verifies the draft asset list. Leave `publish=false`
+to inspect the draft before publication. Use `publish=true` only when the
+release should be published immediately after the asset check. Release
+immutability locks the tag and assets after publication, so a missing asset
+after publication means the release is bad and the fix is a new version.
 
 - Verify the published release:
 
