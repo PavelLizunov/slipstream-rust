@@ -70,6 +70,20 @@ separate tag-signing key.
   git ls-remote --tags origin refs/tags/vX.Y.Z
   ```
 
+  `gh release verify` requires a GitHub CLI version with immutable release
+  verification support. If the installed `gh` does not provide that command,
+  verify the release metadata through the API instead:
+
+  ```sh
+  gh api repos/Mygod/slipstream-rust/releases/tags/vX.Y.Z \
+    -H X-GitHub-Api-Version:2026-03-10
+  gh api repos/Mygod/slipstream-rust/immutable-releases \
+    -H X-GitHub-Api-Version:2026-03-10
+  ```
+
+  The release metadata should show `"immutable": true`, and
+  `target_commitish` should match the validated release commit.
+
 - Fetch the tag locally after publication if needed:
 
   ```sh
