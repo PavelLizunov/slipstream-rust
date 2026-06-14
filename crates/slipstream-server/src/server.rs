@@ -37,7 +37,13 @@ const DNS_MAX_QUERY_SIZE: usize = 512;
 const IDLE_SLEEP_MS: u64 = 10;
 const IDLE_GC_INTERVAL: Duration = Duration::from_secs(1);
 // Default QUIC MTU for server packets; see docs/config.md for details.
-const QUIC_MTU: u32 = 900;
+// Overridable via `--quic-mtu`. This is the direct bytes-per-response
+// lever (brief §4.2): a bigger MTU means each prepared packet — and thus
+// each TXT answer — carries more, amortizing a rate-limited recursor's
+// per-second response budget. It must stay small enough that the encoded
+// response still fits the recursor's EDNS limit (≈ MTU + ~300B framing),
+// so raise it in lockstep with the client's query EDNS.
+pub(crate) const QUIC_MTU: u32 = 900;
 pub(crate) const STREAM_READ_CHUNK_BYTES: usize = 4096;
 pub(crate) const DEFAULT_TCP_RCVBUF_BYTES: usize = 256 * 1024;
 pub(crate) const TARGET_WRITE_COALESCE_DEFAULT_BYTES: usize = 256 * 1024;
@@ -83,6 +89,10 @@ pub struct ServerConfig {
     pub idle_timeout_seconds: u64,
     pub debug_streams: bool,
     pub debug_commands: bool,
+    /// Per-packet QUIC MTU (brief §4.2). The bytes-per-response lever:
+    /// bigger packets carry more per TXT answer. Keep it under the
+    /// recursor's EDNS budget minus framing.
+    pub quic_mtu: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -142,6 +152,57 @@ pub(crate) struct Slot {
     pub(crate) cnx: *mut picoquic_cnx_t,
     pub(crate) path_id: libc::c_int,
     pub(crate) payload_override: Option<Vec<u8>>,
+}
+
+/// Release-safe per-server data-plane counters, logged once per second
+/// (brief §5). On a strict DNS whitelist the only data-carrying path is
+/// the operator recursor, which rate-limits the covert flood; these let
+/// an operator separate the failure modes:
+///
+/// ```text
+/// many queries_in, few payload_responses, large backlog_bytes
+///     -> client under-polling (server HAS data, no poll budget to ship)
+/// many empty_responses, small backlog_bytes
+///     -> server genuinely idle (nothing to send)
+/// payload_responses high, response_payload_bytes/payload_responses small
+///     -> tiny responses burning the recursor's per-second budget;
+///        response bundling / larger EDNS would help
+/// ```
+///
+/// Totals are cumulative; the reader diffs consecutive lines for rates.
+/// `active_connections` and `backlog_bytes` are gauges sampled at report
+/// time. Single-threaded — only the serve loop touches it, so plain
+/// `u64` (no atomics) is sound.
+#[derive(Default)]
+struct ServerCounters {
+    queries_in: u64,
+    query_qname_bytes: u64,
+    payload_responses: u64,
+    empty_responses: u64,
+    response_payload_bytes: u64,
+    prepare_send_length_zero: u64,
+    flow_blocked_samples: u64,
+    has_ready_stream_samples: u64,
+    udp_send_errors: u64,
+}
+
+impl ServerCounters {
+    fn log(&self, active_connections: usize, backlog_bytes: u64) {
+        tracing::info!(
+            "dnstunnel counters: queries_in={} query_qname_bytes={} payload_responses={} empty_responses={} response_payload_bytes={} prepare_send_length_zero={} flow_blocked_samples={} has_ready_stream_samples={} udp_send_errors={} active_connections={} backlog_bytes={}",
+            self.queries_in,
+            self.query_qname_bytes,
+            self.payload_responses,
+            self.empty_responses,
+            self.response_payload_bytes,
+            self.prepare_send_length_zero,
+            self.flow_blocked_samples,
+            self.has_ready_stream_samples,
+            self.udp_send_errors,
+            active_connections,
+            backlog_bytes,
+        );
+    }
 }
 
 pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
@@ -243,7 +304,7 @@ pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
                 "Slipstream server congestion algorithm is unavailable",
             ));
         }
-        configure_quic_with_custom(quic, slipstream_server_cc_algorithm, QUIC_MTU);
+        configure_quic_with_custom(quic, slipstream_server_cc_algorithm, config.quic_mtu);
     }
 
     let udp = Arc::new(bind_udp_socket(&config.dns_listen_host, config.dns_listen_port).await?);
@@ -282,6 +343,10 @@ pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
     let mut last_seen = HashMap::new();
     let mut last_idle_gc = Instant::now();
     let mut last_flow_block_log_at: u64 = 0;
+    // Brief §5 — release-safe data-plane counters, reported ~1/sec.
+    let mut counters = ServerCounters::default();
+    let mut last_counter_report = Instant::now();
+    let mut last_reported_queries_in: u64 = 0;
 
     loop {
         drain_commands(state_ptr, &mut command_rx);
@@ -383,6 +448,9 @@ pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
             let mut addr_from: slipstream_ffi::SockaddrStorage = unsafe { std::mem::zeroed() };
             let mut if_index: libc::c_int = 0;
 
+            counters.queries_in += 1;
+            counters.query_qname_bytes += slot.question.name.len() as u64;
+
             if slot.payload_override.is_none() && slot.rcode.is_none() && !slot.cnx.is_null() {
                 let ret = unsafe {
                     picoquic_prepare_packet_ex(
@@ -403,6 +471,13 @@ pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
                 }
 
                 if send_length == 0 {
+                    counters.prepare_send_length_zero += 1;
+                    if unsafe { slipstream_is_flow_blocked(slot.cnx) != 0 } {
+                        counters.flow_blocked_samples += 1;
+                    }
+                    if unsafe { slipstream_has_ready_stream(slot.cnx) != 0 } {
+                        counters.has_ready_stream_samples += 1;
+                    }
                     let cnx_id = slot.cnx as usize;
                     let metrics = unsafe { (&*state_ptr).stream_debug_metrics(cnx_id) };
                     if metrics.streams_total > 0
@@ -454,6 +529,13 @@ pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
             } else {
                 (None, slot.rcode)
             };
+            match payload {
+                Some(p) if !p.is_empty() => {
+                    counters.payload_responses += 1;
+                    counters.response_payload_bytes += p.len() as u64;
+                }
+                _ => counters.empty_responses += 1,
+            }
             let response = encode_response(&ResponseParams {
                 id: slot.id,
                 rd: slot.rd,
@@ -469,10 +551,32 @@ pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
                 slot.peer
             };
             if let Err(err) = udp.send_to(&response, peer).await {
+                counters.udp_send_errors += 1;
                 if !is_transient_udp_error(&err) {
                     return Err(map_io(err));
                 }
             }
+        }
+
+        // Brief §5 — report data-plane counters at most once per second.
+        // Gauges (active connections, total send backlog) are sampled
+        // here; cumulative totals are diffed by the log reader. Kept
+        // quiet when nothing advanced and there's no backlog.
+        if now.duration_since(last_counter_report) >= Duration::from_secs(1) {
+            let active = collect_active_connections(quic);
+            let mut backlog_bytes = 0u64;
+            for &cnx_id in active.keys() {
+                let m = unsafe { (&*state_ptr).stream_debug_metrics(cnx_id) };
+                backlog_bytes = backlog_bytes
+                    .saturating_add(m.queued_bytes_total)
+                    .saturating_add(m.pending_bytes_total)
+                    .saturating_add(m.send_stash_bytes_total);
+            }
+            if counters.queries_in != last_reported_queries_in || backlog_bytes > 0 {
+                counters.log(active.len(), backlog_bytes);
+            }
+            last_counter_report = now;
+            last_reported_queries_in = counters.queries_in;
         }
     }
 

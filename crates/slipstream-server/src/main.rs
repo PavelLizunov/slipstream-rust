@@ -47,6 +47,13 @@ struct Args {
     debug_streams: bool,
     #[arg(long = "debug-commands")]
     debug_commands: bool,
+    /// Per-packet QUIC MTU (brief §4.2): the bytes-per-response lever.
+    /// Raising it makes each TXT answer carry more, amortizing a
+    /// rate-limited recursor's per-second budget — but the encoded
+    /// response must still fit the recursor's EDNS limit (≈ MTU + ~300B
+    /// framing), so raise it in lockstep with the client's query EDNS.
+    #[arg(long = "quic-mtu", default_value_t = server::QUIC_MTU)]
+    quic_mtu: u32,
 }
 
 fn main() {
@@ -160,6 +167,7 @@ fn main() {
         idle_timeout_seconds: args.idle_timeout_seconds,
         debug_streams: args.debug_streams,
         debug_commands: args.debug_commands,
+        quic_mtu: args.quic_mtu,
     };
 
     let runtime = Builder::new_current_thread()
