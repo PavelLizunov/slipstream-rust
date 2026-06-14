@@ -37,7 +37,13 @@ const DNS_MAX_QUERY_SIZE: usize = 512;
 const IDLE_SLEEP_MS: u64 = 10;
 const IDLE_GC_INTERVAL: Duration = Duration::from_secs(1);
 // Default QUIC MTU for server packets; see docs/config.md for details.
-const QUIC_MTU: u32 = 900;
+// Overridable via `--quic-mtu`. This is the direct bytes-per-response
+// lever (brief §4.2): a bigger MTU means each prepared packet — and thus
+// each TXT answer — carries more, amortizing a rate-limited recursor's
+// per-second response budget. It must stay small enough that the encoded
+// response still fits the recursor's EDNS limit (≈ MTU + ~300B framing),
+// so raise it in lockstep with the client's query EDNS.
+pub(crate) const QUIC_MTU: u32 = 900;
 pub(crate) const STREAM_READ_CHUNK_BYTES: usize = 4096;
 pub(crate) const DEFAULT_TCP_RCVBUF_BYTES: usize = 256 * 1024;
 pub(crate) const TARGET_WRITE_COALESCE_DEFAULT_BYTES: usize = 256 * 1024;
@@ -83,6 +89,10 @@ pub struct ServerConfig {
     pub idle_timeout_seconds: u64,
     pub debug_streams: bool,
     pub debug_commands: bool,
+    /// Per-packet QUIC MTU (brief §4.2). The bytes-per-response lever:
+    /// bigger packets carry more per TXT answer. Keep it under the
+    /// recursor's EDNS budget minus framing.
+    pub quic_mtu: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -294,7 +304,7 @@ pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
                 "Slipstream server congestion algorithm is unavailable",
             ));
         }
-        configure_quic_with_custom(quic, slipstream_server_cc_algorithm, QUIC_MTU);
+        configure_quic_with_custom(quic, slipstream_server_cc_algorithm, config.quic_mtu);
     }
 
     let udp = Arc::new(bind_udp_socket(&config.dns_listen_host, config.dns_listen_port).await?);
