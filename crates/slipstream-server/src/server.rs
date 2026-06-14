@@ -472,12 +472,6 @@ pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
 
                 if send_length == 0 {
                     counters.prepare_send_length_zero += 1;
-                    if unsafe { slipstream_is_flow_blocked(slot.cnx) != 0 } {
-                        counters.flow_blocked_samples += 1;
-                    }
-                    if unsafe { slipstream_has_ready_stream(slot.cnx) != 0 } {
-                        counters.has_ready_stream_samples += 1;
-                    }
                     let cnx_id = slot.cnx as usize;
                     let metrics = unsafe { (&*state_ptr).stream_debug_metrics(cnx_id) };
                     if metrics.streams_total > 0
@@ -485,9 +479,25 @@ pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
                         && loop_time.saturating_sub(last_flow_block_log_at)
                             >= FLOW_BLOCKED_LOG_INTERVAL_US
                     {
+                        // flow-blocked / has-ready-stream are sampled ONLY
+                        // here, inside the `streams_total > 0` guard — NEVER
+                        // on a bare `slot.cnx`. `picoquic_prepare_packet_ex`
+                        // can free a closing connection, after which an
+                        // unguarded FFI deref of `slot.cnx` is a
+                        // use-after-free (segfault reading a cnx field — the
+                        // counters v1 crashed exactly this way under high
+                        // connection churn). The map-backed `streams_total`
+                        // check gates the deref to a still-tracked cnx — the
+                        // same protection the stall-warn has always used.
                         let flow_blocked = unsafe { slipstream_is_flow_blocked(slot.cnx) != 0 };
                         let has_ready_stream =
                             unsafe { slipstream_has_ready_stream(slot.cnx) != 0 };
+                        if flow_blocked {
+                            counters.flow_blocked_samples += 1;
+                        }
+                        if has_ready_stream {
+                            counters.has_ready_stream_samples += 1;
+                        }
                         let send_backlog =
                             unsafe { (&*state_ptr).stream_send_backlog_summaries(cnx_id, 8) };
                         tracing::warn!(
