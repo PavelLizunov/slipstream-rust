@@ -144,6 +144,57 @@ pub(crate) struct Slot {
     pub(crate) payload_override: Option<Vec<u8>>,
 }
 
+/// Release-safe per-server data-plane counters, logged once per second
+/// (brief §5). On a strict DNS whitelist the only data-carrying path is
+/// the operator recursor, which rate-limits the covert flood; these let
+/// an operator separate the failure modes:
+///
+/// ```text
+/// many queries_in, few payload_responses, large backlog_bytes
+///     -> client under-polling (server HAS data, no poll budget to ship)
+/// many empty_responses, small backlog_bytes
+///     -> server genuinely idle (nothing to send)
+/// payload_responses high, response_payload_bytes/payload_responses small
+///     -> tiny responses burning the recursor's per-second budget;
+///        response bundling / larger EDNS would help
+/// ```
+///
+/// Totals are cumulative; the reader diffs consecutive lines for rates.
+/// `active_connections` and `backlog_bytes` are gauges sampled at report
+/// time. Single-threaded — only the serve loop touches it, so plain
+/// `u64` (no atomics) is sound.
+#[derive(Default)]
+struct ServerCounters {
+    queries_in: u64,
+    query_qname_bytes: u64,
+    payload_responses: u64,
+    empty_responses: u64,
+    response_payload_bytes: u64,
+    prepare_send_length_zero: u64,
+    flow_blocked_samples: u64,
+    has_ready_stream_samples: u64,
+    udp_send_errors: u64,
+}
+
+impl ServerCounters {
+    fn log(&self, active_connections: usize, backlog_bytes: u64) {
+        tracing::info!(
+            "dnstunnel counters: queries_in={} query_qname_bytes={} payload_responses={} empty_responses={} response_payload_bytes={} prepare_send_length_zero={} flow_blocked_samples={} has_ready_stream_samples={} udp_send_errors={} active_connections={} backlog_bytes={}",
+            self.queries_in,
+            self.query_qname_bytes,
+            self.payload_responses,
+            self.empty_responses,
+            self.response_payload_bytes,
+            self.prepare_send_length_zero,
+            self.flow_blocked_samples,
+            self.has_ready_stream_samples,
+            self.udp_send_errors,
+            active_connections,
+            backlog_bytes,
+        );
+    }
+}
+
 pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
     let cert_path = Path::new(&config.cert);
     let key_path = Path::new(&config.key);
@@ -282,6 +333,10 @@ pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
     let mut last_seen = HashMap::new();
     let mut last_idle_gc = Instant::now();
     let mut last_flow_block_log_at: u64 = 0;
+    // Brief §5 — release-safe data-plane counters, reported ~1/sec.
+    let mut counters = ServerCounters::default();
+    let mut last_counter_report = Instant::now();
+    let mut last_reported_queries_in: u64 = 0;
 
     loop {
         drain_commands(state_ptr, &mut command_rx);
@@ -383,6 +438,9 @@ pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
             let mut addr_from: slipstream_ffi::SockaddrStorage = unsafe { std::mem::zeroed() };
             let mut if_index: libc::c_int = 0;
 
+            counters.queries_in += 1;
+            counters.query_qname_bytes += slot.question.name.len() as u64;
+
             if slot.payload_override.is_none() && slot.rcode.is_none() && !slot.cnx.is_null() {
                 let ret = unsafe {
                     picoquic_prepare_packet_ex(
@@ -403,6 +461,13 @@ pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
                 }
 
                 if send_length == 0 {
+                    counters.prepare_send_length_zero += 1;
+                    if unsafe { slipstream_is_flow_blocked(slot.cnx) != 0 } {
+                        counters.flow_blocked_samples += 1;
+                    }
+                    if unsafe { slipstream_has_ready_stream(slot.cnx) != 0 } {
+                        counters.has_ready_stream_samples += 1;
+                    }
                     let cnx_id = slot.cnx as usize;
                     let metrics = unsafe { (&*state_ptr).stream_debug_metrics(cnx_id) };
                     if metrics.streams_total > 0
@@ -454,6 +519,13 @@ pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
             } else {
                 (None, slot.rcode)
             };
+            match payload {
+                Some(p) if !p.is_empty() => {
+                    counters.payload_responses += 1;
+                    counters.response_payload_bytes += p.len() as u64;
+                }
+                _ => counters.empty_responses += 1,
+            }
             let response = encode_response(&ResponseParams {
                 id: slot.id,
                 rd: slot.rd,
@@ -469,10 +541,32 @@ pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
                 slot.peer
             };
             if let Err(err) = udp.send_to(&response, peer).await {
+                counters.udp_send_errors += 1;
                 if !is_transient_udp_error(&err) {
                     return Err(map_io(err));
                 }
             }
+        }
+
+        // Brief §5 — report data-plane counters at most once per second.
+        // Gauges (active connections, total send backlog) are sampled
+        // here; cumulative totals are diffed by the log reader. Kept
+        // quiet when nothing advanced and there's no backlog.
+        if now.duration_since(last_counter_report) >= Duration::from_secs(1) {
+            let active = collect_active_connections(quic);
+            let mut backlog_bytes = 0u64;
+            for &cnx_id in active.keys() {
+                let m = unsafe { (&*state_ptr).stream_debug_metrics(cnx_id) };
+                backlog_bytes = backlog_bytes
+                    .saturating_add(m.queued_bytes_total)
+                    .saturating_add(m.pending_bytes_total)
+                    .saturating_add(m.send_stash_bytes_total);
+            }
+            if counters.queries_in != last_reported_queries_in || backlog_bytes > 0 {
+                counters.log(active.len(), backlog_bytes);
+            }
+            last_counter_report = now;
+            last_reported_queries_in = counters.queries_in;
         }
     }
 
